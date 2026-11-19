@@ -1,4 +1,6 @@
 import base64
+import json
+import re
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -46,6 +48,7 @@ TEXT = {
     "change12": {"ja": "12か月の変化", "en": "12-month change", "ko": "12개월 변화", "zh": "12个月变化"},
     "month": {"ja": "年月", "en": "Month", "ko": "연월", "zh": "年月"},
     "flat": {"ja": "横ばい", "en": "Flat", "ko": "보합", "zh": "持平"},
+    "to_top": {"ja": "ページの先頭へ戻る", "en": "Back to top", "ko": "맨 위로 이동", "zh": "返回顶部"},
     "loading": {"ja": "e-Stat からデータを取得中…", "en": "Loading data from e-Stat…",
                 "ko": "e-Stat에서 데이터를 불러오는 중…", "zh": "正在从 e-Stat 获取数据…"},
     "error": {"ja": "データを取得できませんでした: {e}", "en": "Could not load data: {e}",
@@ -335,7 +338,17 @@ header[data-testid="stHeader"] { display: none; }
 
 /* 統計サマリー */
 .stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
-.stat { background: var(--page); border-radius: 16px; padding: 18px 20px 16px; }
+.stat { background: var(--page); border-radius: 16px; padding: 18px 20px 16px; border: 1px solid transparent;
+        transition: transform 0.25s cubic-bezier(0.2, 0.7, 0.2, 1), box-shadow 0.25s ease,
+                    background-color 0.25s ease, border-color 0.25s ease; }
+.stat-name i { transition: transform 0.25s ease, box-shadow 0.25s ease; }
+/* マウス操作の端末だけホバー効果を付ける（スマホでタップ後に浮いたまま残らないように） */
+@media (hover: hover) {
+  .stat:hover { transform: translateY(-4px); background: var(--card);
+                border-color: color-mix(in srgb, var(--c) 35%, transparent);
+                box-shadow: 0 20px 40px -20px rgba(50, 50, 93, 0.35), 0 8px 16px -12px rgba(0, 0, 0, 0.12); }
+  .stat:hover .stat-name i { transform: scale(1.25); box-shadow: 0 0 0 3px color-mix(in srgb, var(--c) 18%, transparent); }
+}
 .stat-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .stat-name { display: flex; align-items: center; gap: 8px; font-size: 15px; font-weight: 700; color: var(--ink); }
 .stat-name i { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
@@ -350,6 +363,7 @@ header[data-testid="stHeader"] { display: none; }
 .stat-foot b { font-weight: 700; color: var(--ink); font-variant-numeric: tabular-nums; }
 
 [data-testid="stDataFrame"] { border: 1px solid var(--line); border-radius: 14px; overflow: hidden; }
+
 
 /* ── フッター ── */
 .foot { margin-top: 72px; padding: 48px 0 56px; background: var(--night); color: rgba(255, 255, 255, 0.55);
@@ -386,9 +400,267 @@ header[data-testid="stHeader"] { display: none; }
 /* 動きを減らす設定の端末ではアニメーションを止める */
 @media (prefers-reduced-motion: reduce) {
   .hero-bg, .ticker-track, .pulse::after, .stApp li.row { animation: none; }
+  .stat, .stat-name i { transition: none; }
+  .stat:hover { transform: none; }
 }
 </style>
 """
+
+
+# ── TOP ボタン ────────────────────────────────────────
+# ① スクロールすると、右下にボールのように弾む「TOP」が現れる（これはダミー）
+# ② カーソルが近づくと、磁石の同じ極どうしのように反発して逃げる
+# ③ 最初に逃げてから 14 秒後に、元の位置へ「本物の TOP ボタン」が透明→不透明へとてもゆっくり現れる
+TOP_CSS = """
+.jtb-fake, .jtb-real { font-family: 'JetBrains Mono', ui-monospace, Menlo, Consolas, monospace;
+                       -webkit-tap-highlight-color: transparent; }
+
+/* ダミー（逃げるボール） */
+.jtb-fake { position: fixed; right: 24px; bottom: 24px; width: 60px; height: 60px; z-index: 10000;
+            opacity: 0; visibility: hidden; transform: translate(0, 0);
+            transition: transform .34s cubic-bezier(.22, 1, .36, 1), opacity .3s ease, visibility 0s linear .3s; }
+.jtb-fake.in { opacity: 1; visibility: visible;
+               transition: transform .34s cubic-bezier(.22, 1, .36, 1), opacity .3s ease, visibility 0s; }
+.jtb-ball { position: relative; width: 60px; height: 60px; border-radius: 50%; color: #fff;
+            display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1px;
+            background: radial-gradient(circle at 30% 25%, rgba(255, 255, 255, .35), transparent 42%),
+                        linear-gradient(135deg, #3B2BE0 0%, #6E46FF 45%, #FF6A88 100%);
+            box-shadow: 0 10px 24px -8px rgba(59, 43, 224, .6), inset 0 -4px 10px rgba(0, 0, 0, .15);
+            font-size: 10px; font-weight: 700; letter-spacing: .1em; transform-origin: 50% 100%;
+            user-select: none; cursor: default; }
+.jtb-shadow { position: absolute; left: 50%; bottom: -12px; width: 44px; height: 8px; margin-left: -22px;
+              border-radius: 50%; background: rgba(11, 18, 32, .30); filter: blur(3px); }
+.jtb-fake.in .jtb-ball { animation: jtb-dribble 1.05s infinite; }
+.jtb-fake.in .jtb-shadow { animation: jtb-shadow 1.05s infinite; }
+
+/* バスケットボールのドリブル：床で潰れて → 伸びながら上がり → 頂点で減速 → 加速して落ちる */
+@keyframes jtb-dribble {
+  0%   { transform: translateY(0) scale(1.14, .84); animation-timing-function: cubic-bezier(.3, .8, .5, 1); }
+  10%  { transform: translateY(-9px) scale(.94, 1.07); animation-timing-function: cubic-bezier(.25, .7, .45, 1); }
+  50%  { transform: translateY(-38px) scale(1, 1); animation-timing-function: cubic-bezier(.55, 0, .85, .4); }
+  92%  { transform: translateY(-3px) scale(.96, 1.05); animation-timing-function: linear; }
+  100% { transform: translateY(0) scale(1.14, .84); }
+}
+@keyframes jtb-shadow {
+  0%, 100% { transform: scale(1); opacity: .9; animation-timing-function: cubic-bezier(.3, .8, .5, 1); }
+  50%      { transform: scale(.5); opacity: .3; animation-timing-function: cubic-bezier(.55, 0, .85, .4); }
+}
+
+/* 本物の TOP ボタン */
+.jtb-real { position: fixed; right: 24px; bottom: 24px; width: 60px; height: 60px; z-index: 9999;
+            display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px;
+            border: none; border-radius: 18px; background: #0B1220; color: #fff; cursor: pointer;
+            font-size: 10px; font-weight: 700; letter-spacing: .1em;
+            box-shadow: 0 14px 30px -12px rgba(11, 18, 32, .55);
+            opacity: 0; visibility: hidden; pointer-events: none;
+            transition: opacity .2s linear, transform .2s ease, box-shadow .2s ease; }
+.jtb-real.on { visibility: visible; }
+.jtb-real.ready { pointer-events: auto; }
+.jtb-real.ready:hover { transform: translateY(-3px); box-shadow: 0 18px 34px -12px rgba(11, 18, 32, .6); }
+.jtb-real:focus-visible { opacity: 1 !important; pointer-events: auto; outline: 3px solid #7CFFB2; outline-offset: 3px; }
+
+@media (max-width: 640px) {
+  .jtb-fake, .jtb-real { right: 16px; bottom: 16px; }
+  .jtb-fake, .jtb-ball, .jtb-real { width: 52px; height: 52px; }
+}
+/* 動きを減らす設定の端末では、ダミーを出さず本物のボタンだけを表示する */
+@media (prefers-reduced-motion: reduce) { .jtb-fake { display: none; } }
+"""
+
+TOP_JS = """
+(() => {
+  if (window.__jeiTopButton) return;          // 再実行時に二重に作らない
+  window.__jeiTopButton = true;
+
+  const LABEL = __LABEL__;
+  const SHOW_AT = 360;    // これ以上スクロールしたら表示（px）
+  const REPEL = 150;      // カーソルがこの距離まで近づいたら逃げる（px）
+  const DELAY_MS = 14000; // 最初に逃げてから、本物のボタンが現れ始めるまでの時間
+  const FADE_MS = 8000;   // 現れ始めてから完全に表示されるまでの時間（とてもゆっくり）
+  const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const ARROW = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
+                'stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+                '<path d="m5 12 7-7 7 7"/><path d="M12 19V5"/></svg>';
+
+  const style = document.createElement("style");
+  style.textContent = __CSS__;
+  document.head.appendChild(style);
+
+  const fake = document.createElement("div");
+  fake.className = "jtb-fake";
+  fake.setAttribute("aria-hidden", "true");
+  fake.innerHTML = '<div class="jtb-shadow"></div><div class="jtb-ball">' + ARROW + "<span>TOP</span></div>";
+
+  const real = document.createElement("button");
+  real.type = "button";
+  real.className = "jtb-real";
+  real.setAttribute("aria-label", LABEL);
+  real.title = LABEL;
+  real.innerHTML = ARROW + "<span>TOP</span>";
+
+  document.body.appendChild(real);
+  document.body.appendChild(fake);
+
+  let shown = false, x = 0, y = 0, progress = 0, fleeStart = 0, raf = 0;
+
+  const scroller = () => document.querySelector('[data-testid="stMain"]') || document.scrollingElement;
+
+  function setProgress(p) {
+    progress = Math.min(1, Math.max(0, p));
+    real.style.opacity = progress.toFixed(3);
+    real.classList.toggle("ready", progress >= 0.35);
+  }
+
+  function place(nx, ny) {
+    x = nx; y = ny;
+    fake.style.transform = "translate(" + x + "px," + y + "px)";
+  }
+
+  function metrics() {
+    const size = fake.offsetWidth || 60;
+    const m = parseFloat(getComputedStyle(fake).right) || 24;
+    return { size, m };
+  }
+
+  // ダミーの「元の位置」の中心座標
+  function home() {
+    const { size, m } = metrics();
+    return [window.innerWidth - m - size / 2, window.innerHeight - m - size / 2];
+  }
+
+  // 画面からはみ出さない範囲（弾む高さの分、上側に余白を取る）
+  function clamp(nx, ny) {
+    const { size, m } = metrics();
+    const minX = -(window.innerWidth - 2 * m - size);
+    const minY = -(window.innerHeight - 2 * m - size - 48);
+    return [Math.min(0, Math.max(minX, nx)), Math.min(0, Math.max(minY, ny))];
+  }
+
+  // カーソルからいちばん遠い場所を探す（追い詰められたとき用）
+  function farSpot(px, py) {
+    const [hx, hy] = home();
+    const [minX, minY] = clamp(-1e6, -1e6);
+    let best = [x, y], bestD = -1;
+    for (let i = 0; i < 14; i++) {
+      const nx = minX * Math.random(), ny = minY * Math.random();
+      const d = Math.hypot(hx + nx - px, hy + ny - py);
+      if (d > bestD) { bestD = d; best = [nx, ny]; }
+    }
+    return best;
+  }
+
+  // 最初に逃げた瞬間から時間を計り、DELAY_MS 後から FADE_MS かけて本物を表示する
+  function tick() {
+    if (!shown || !fleeStart) return;
+    const t = Math.min(1, Math.max(0, (performance.now() - fleeStart - DELAY_MS) / FADE_MS));
+    setProgress(0.5 - 0.5 * Math.cos(Math.PI * t));   // 始めと終わりが特にゆっくりな曲線
+    if (t < 1) raf = requestAnimationFrame(tick);
+  }
+
+  function startReveal() {
+    if (fleeStart || reduce) return;
+    fleeStart = performance.now();
+    raf = requestAnimationFrame(tick);
+  }
+
+  function stopReveal() {
+    fleeStart = 0;
+    cancelAnimationFrame(raf);
+  }
+
+  // 同じ極の磁石のように反発：カーソルと反対方向へ。壁際なら横へすり抜け、それも無理なら遠くへ逃げる
+  function flee(px, py) {
+    const [hx, hy] = home();
+    let dx = hx + x - px, dy = hy + y - py;
+    let d = Math.hypot(dx, dy);
+    if (d < 0.01) { dx = 1; dy = 0; d = 1; }
+    const ux = dx / d, uy = dy / d, r = Math.SQRT1_2;
+    const push = (REPEL - d) * 1.2 + 16;
+    const dirs = [[ux, uy], [(ux - uy) * r, (uy + ux) * r], [(ux + uy) * r, (uy - ux) * r], [-uy, ux], [uy, -ux]];
+    let best = null, bestD = -1;
+    for (const [vx, vy] of dirs) {
+      const [nx, ny] = clamp(x + vx * push, y + vy * push);
+      const nd = Math.hypot(hx + nx - px, hy + ny - py);
+      if (nd > bestD) { bestD = nd; best = [nx, ny]; }
+    }
+    if (bestD < REPEL * 0.75) best = farSpot(px, py);
+    place(best[0], best[1]);
+    startReveal();
+  }
+
+  function show(on) {
+    if (on === shown) return;
+    shown = on;
+    if (on) {
+      place(0, 0);
+      stopReveal();
+      real.classList.add("on");
+      if (reduce) { setProgress(1); return; }
+      setProgress(0);
+      fake.classList.add("in");
+    } else {
+      fake.classList.remove("in");
+      real.classList.remove("on");
+      stopReveal();
+      setProgress(0);
+      setTimeout(() => { if (!shown) place(0, 0); }, 320);
+    }
+  }
+
+  // スクロール位置で表示・非表示（表やグラフ内部のスクロールは無視）
+  document.addEventListener("scroll", (e) => {
+    const s = scroller();
+    if (e.target !== s && e.target !== document) return;
+    const top = e.target === document ? (document.scrollingElement || document.documentElement).scrollTop : s.scrollTop;
+    show(top > SHOW_AT);
+  }, true);
+
+  // マウス：近づいたら逃げる
+  document.addEventListener("mousemove", (e) => {
+    if (!shown || reduce) return;
+    const [hx, hy] = home();
+    if (Math.hypot(hx + x - e.clientX, hy + y - e.clientY) < REPEL) flee(e.clientX, e.clientY);
+  }, { passive: true });
+
+  // スマホ：触ろうとしたら逃げる
+  fake.addEventListener("touchstart", (e) => {
+    e.preventDefault();
+    const t = e.touches[0];
+    const spot = farSpot(t.clientX, t.clientY);
+    place(spot[0], spot[1]);
+    startReveal();
+  }, { passive: false });
+
+  // 素早いマウスで捕まえられても、クリックは受け付けずに逃げる
+  fake.addEventListener("click", (e) => {
+    e.preventDefault();
+    const spot = farSpot(e.clientX, e.clientY);
+    place(spot[0], spot[1]);
+    startReveal();
+  });
+
+  // 本物：ページの先頭へ一気にスクロール
+  real.addEventListener("click", () => {
+    const behavior = reduce ? "auto" : "smooth";
+    const s = scroller();
+    if (s && s.scrollTo) s.scrollTo({ top: 0, behavior });
+    window.scrollTo({ top: 0, behavior });
+  });
+
+  window.addEventListener("resize", () => { const [nx, ny] = clamp(x, y); place(nx, ny); });
+
+  const s = scroller();
+  show(!!s && s.scrollTop > SHOW_AT);
+})();
+"""
+
+
+def top_button_html() -> str:
+    js = TOP_JS.replace("__CSS__", json.dumps(TOP_CSS)).replace("__LABEL__", json.dumps(T("to_top")))
+    # st.html の安全フィルター（DOMPurify）は、スクリプト内に「<svg」「</span>」のような
+    # タグ風の文字列があるとスクリプトごと削除する。そのため「<」を JS のエスケープ表記 < に置き換える
+    js = re.sub(r"<(?=[/\w!])", r"\\u003c", js)
+    return f"<script>{js}</script>"
 
 
 # ── データ ───────────────────────────────────────────
@@ -696,7 +968,7 @@ def stats_html(df, series, key_col, value_col, unit) -> str:
         hi, lo = d.loc[v.idxmax()], d.loc[v.idxmin()]
         change = v.iloc[-1] - v.iloc[0]
         cards.append(f"""
-<div class="stat">
+<div class="stat" style="--c:{s['color']}">
   <div class="stat-head">
     <span class="stat-name"><i style="background:{s['color']}"></i>{name(s)}</span>
     <span class="stat-latest"><small>{T("latest")}</small>{v.iloc[-1]:.1f}{unit}</span>
@@ -801,4 +1073,5 @@ st.html(f"""
     <div class="foot-meta mono">DATA SOURCE: E-STAT API · STATSDATAID 0004052037 / 0003446461</div>
   </div>
 </footer>
-""")
+{top_button_html()}
+""", unsafe_allow_javascript=True)  # 右下の TOP ボタン用の JavaScript をフッターと一緒に実行する
