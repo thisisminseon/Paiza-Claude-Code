@@ -281,6 +281,9 @@ header[data-testid="stHeader"] { display: none; }
 .stApp li.row { display: flex; align-items: center; gap: 14px; margin: 0 !important; padding: 11px 0;
                 border-top: 1px solid var(--line); }
 .stApp li.row:first-child { border-top: none; }
+/* 行ごとに少しずつ遅れて浮かび上がる（--d は行ごとの遅延） */
+.stApp li.row { animation: rise 0.8s cubic-bezier(0.25, 0.6, 0.3, 1) var(--d, 0s) both; }
+@keyframes rise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
 .row-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
 .row-main { flex: 1; min-width: 0; }
 .row-name { font-size: 15px; font-weight: 700; color: var(--ink); }
@@ -382,7 +385,7 @@ header[data-testid="stHeader"] { display: none; }
 
 /* 動きを減らす設定の端末ではアニメーションを止める */
 @media (prefers-reduced-motion: reduce) {
-  .hero-bg, .ticker-track, .pulse::after { animation: none; }
+  .hero-bg, .ticker-track, .pulse::after, .stApp li.row { animation: none; }
 }
 </style>
 """
@@ -449,18 +452,32 @@ def delta_html(diff: float, unit: str = "pt") -> str:
     return f'{icon("minus", 12, 2.5)}{T("flat")}'
 
 
-def sparkline(values, color, w=80, h=30, pad=4) -> str:
+def sparkline(values, color, w=80, h=30, pad=4, delay=0.0) -> str:
+    """ミニグラフ。表示時に線が左から描かれ、最後に最新月の点が現れる（CSS アニメーション）"""
     vmin, vmax = min(values), max(values)
     rng = (vmax - vmin) or 1
     step = (w - 2 * pad) / (len(values) - 1)
     pts = [(pad + i * step, pad + (vmax - v) * (h - 2 * pad) / rng) for i, v in enumerate(values)]
     poly = " ".join(f"{x:.1f},{y:.1f}" for x, y in pts)
     lx, ly = pts[-1]
+    # 線の長さ（stroke-dasharray で「描かれていく」動きを作るために使う）
+    length = sum(((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5 for (x1, y1), (x2, y2) in zip(pts, pts[1:])) + 1
+    style = (
+        f".l{{stroke-dasharray:{length:.1f};stroke-dashoffset:{length:.1f};"
+        f"animation:draw 1.4s cubic-bezier(.45,.05,.25,1) {delay:.2f}s forwards}}"
+        f".p{{opacity:0;transform:scale(0);transform-box:fill-box;transform-origin:center;"
+        f"animation:pop .5s cubic-bezier(.34,1.3,.64,1) {delay + 1.25:.2f}s forwards}}"
+        "@keyframes draw{to{stroke-dashoffset:0}}"
+        "@keyframes pop{to{opacity:1;transform:scale(1)}}"
+        "@media (prefers-reduced-motion:reduce){.l{animation:none;stroke-dashoffset:0}"
+        ".p{animation:none;opacity:1;transform:none}}"
+    )
     svg = (
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" viewBox="0 0 {w} {h}">'
-        f'<polyline points="{poly}" fill="none" stroke="{color}" stroke-width="2" '
+        f"<style>{style}</style>"
+        f'<polyline class="l" points="{poly}" fill="none" stroke="{color}" stroke-width="2" '
         f'stroke-linecap="round" stroke-linejoin="round"/>'
-        f'<circle cx="{lx:.1f}" cy="{ly:.1f}" r="3.5" fill="{color}" stroke="#fff" stroke-width="2"/></svg>'
+        f'<circle class="p" cx="{lx:.1f}" cy="{ly:.1f}" r="3.5" fill="{color}" stroke="#fff" stroke-width="2"/></svg>'
     )
     return svg_img(svg, w, h, cls="spark")
 
@@ -506,16 +523,18 @@ def lang_menu_html() -> str:
 </details>"""
 
 
-def panel_rows(df, series, key_col, value_col, unit) -> str:
+def panel_rows(df, series, key_col, value_col, unit, start=0) -> str:
+    """start: パネル全体での行番号の開始値（行ごとにアニメーションを少しずつ遅らせる）"""
     rows = []
-    for s in series:
+    for i, s in enumerate(series):
         values = series_frame(df, key_col, s["item"], value_col)[value_col].tolist()
         diff = round(values[-1] - values[-2], 1)
+        delay = 0.3 + (start + i) * 0.15
         rows.append(f"""
-<li class="row">
+<li class="row" style="--d:{delay - 0.2:.2f}s">
   <span class="row-dot" style="background:{s['color']}"></span>
   <div class="row-main"><div class="row-name">{name(s)}</div><div class="row-sub">{sub(s)}</div></div>
-  {sparkline(values, s['color'])}
+  {sparkline(values, s['color'], delay=delay)}
   <div class="row-val"><div class="v">{values[-1]:.1f}{unit}</div><div class="d">{delta_html(diff)}</div></div>
 </li>""")
     return "".join(rows)
@@ -550,7 +569,7 @@ def hero_html(cpi, ci, latest) -> str:
         <div class="group-label">{T("group_cpi")}</div>
         <ul class="rows">{panel_rows(cpi, CPI_SERIES, "品目", "前年同月比(%)", "%")}</ul>
         <div class="group-label">{T("group_ci")}</div>
-        <ul class="rows">{panel_rows(ci, CI_SERIES, "系列", "CI指数", "")}</ul>
+        <ul class="rows">{panel_rows(ci, CI_SERIES, "系列", "CI指数", "", start=len(CPI_SERIES))}</ul>
       </div>
     </div>
   </div>
