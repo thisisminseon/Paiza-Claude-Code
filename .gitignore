@@ -1,0 +1,11 @@
+# 秘密情報（APIキーなど）
+.env
+
+# エディタの個人設定
+.vscode/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
